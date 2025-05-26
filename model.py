@@ -143,28 +143,29 @@ class TimestepEmbedder(nn.Module):
         self.frequency_embedding_size = frequency_embedding_size
 
     @staticmethod
-    def timestep_embedding(t, dim, max_period=10000):
+    def timestep_embedding(t, dim, max_period=10000, freq_scale=1):
         """
         Create sinusoidal timestep embeddings.
         :param t: a 1-D Tensor of N indices, one per batch element.
                           These may be fractional.
         :param dim: the dimension of the output.
         :param max_period: controls the minimum frequency of the embeddings.
+        :freq_scale: controls the scaling factor of the frequencies
         :return: an (N, D) Tensor of positional embeddings.
         """
         # https://github.com/openai/glide-text2im/blob/main/glide_text2im/nn.py
         half = dim // 2
-        freqs = torch.exp(-math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half).to(
+        freqs = freq_scale * torch.exp(-math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half).to(
             device=t.device
-        )
+        ) 
         args = t[:, None].float() * freqs[None]
         embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
         if dim % 2:
             embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
         return embedding
 
-    def forward(self, t):
-        t_freq = self.timestep_embedding(t, self.frequency_embedding_size)
+    def forward(self, t, freq_scale=1):
+        t_freq = self.timestep_embedding(t, self.frequency_embedding_size, freq_scale=freq_scale)
         t_emb = self.mlp(t_freq)
         return t_emb
 
@@ -255,12 +256,14 @@ class NanoDiT(nn.Module):
         num_heads=6,
         mlp_ratio=4.0,
         num_classes=10,
+        timestep_freq_scale=1.0,
     ):
         super().__init__()
         self.in_channels = in_channels
         self.out_channels = in_channels
         self.patch_size = patch_size
         self.num_heads = num_heads
+        self.timestep_freq_scale=timestep_freq_scale
 
         self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size)
         self.t_embedder = TimestepEmbedder(hidden_size)
@@ -335,7 +338,7 @@ class NanoDiT(nn.Module):
         y: (N,) tensor of class labels
         """
         x = self.x_embedder(x) + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2
-        t = self.t_embedder(t)  # (N, D)
+        t = self.t_embedder(t, freq_scale=self.timestep_freq_scale)  # (N, D)
         y = self.y_embedder(y, self.training)  # (N, D)
         c = t + y  # (N, D)
         for block in self.blocks:
