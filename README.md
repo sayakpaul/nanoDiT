@@ -32,13 +32,13 @@ python train.py
 `train.py` has reasonable defaults set as constants at the top of the file. Feel free to modify them as needed. Running the script as is yields the following loss curve:
 
 <div align="center">
-<img src="assets/loss.png">
+<img src="assets/loss.png" width=400/>
 </div>
 
 The final step of intermediate result visualization yields:
 
 <div align="center">
-<img src="assets/collage_output.png">
+<img src="assets/collage_output.png"/>
 </div>
 
 By default, we train on the 64x64 resolution to keep the runtime short and memory requirements lower.
