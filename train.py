@@ -1,5 +1,5 @@
 """
-Thanks to Gemini 2.5 for pairing.
+Thanks to Gemini 2.5 for pairing here and there.
 """
 
 import torch
@@ -12,20 +12,20 @@ import torchvision
 from contextlib import nullcontext
 
 # --- Hyperparameters ---
-NUM_CLASSES = 10  # Example: CIFAR-10 or your number of classes
-IMG_SIZE = 32  # Example: CIFAR-10 image size
-IMG_CHANNELS = 3  # Example: CIFAR-10 image channels
+NUM_CLASSES = 75  
+IMG_SIZE = 64
+IMG_CHANNELS = 3 
 # DiT specific parameters
-LATENT_DIM = 384
+LATENT_DIM = 768
 PATCH_SIZE = 2
-MODEL_DEPTH = 6
-MODEL_HEADS = 8
+MODEL_DEPTH = 12
+MODEL_HEADS = 12
 # Diffusion process parameters
-NUM_TIMESTEPS = 1000
+NUM_ODE_STEPS = 150
 # Training parameters
 LEARNING_RATE = 1e-4
-BATCH_SIZE = 768
-EPOCHS = 300
+BATCH_SIZE = 128
+EPOCHS = 600
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 COMPILE = True
 AMP_DTYPE = torch.bfloat16 # automatic mixed-precision unless you wanna touch grass
@@ -35,72 +35,29 @@ NUM_SAMPLES_PER_CLASS = 4  # Number of images to sample per class during evaluat
 CFG_SCALE = 5.0
 # Others
 CHECKPOINT_SAVE_INTERVAL = 25
-DATA_DIR = "." # directory to store CIFAR10.
+DATA_DIR = "butterflies" # Directory where the dataset is stored.
 
-# --- Helper Functions for diffusion math ---
-def extract(a, t, x_shape):
-    """Extracts coefficients at specific timesteps t and reshapes to x_shape."""
-    batch_size = t.shape[0]
-    out = a.gather(-1, t.long())  # Ensure t is long
-    return out.reshape(batch_size, *((1,) * (len(x_shape) - 1))).to(t.device)
+# --- Helper functions for flow-matching math ---
+def flow_lerp(x):
+    bsz = x.shape[0]
+    t = torch.rand((bsz,)).to(x.device)
+    t_broadcast = t.view(bsz, 1, 1, 1)
+    z1 = torch.randn_like(x)
+    # the flow-matching lerp
+    zt = (1 - t_broadcast) * x + t_broadcast * z1
+    return zt, z1, t
 
-
-def q_sample(x_start, sqrt_alphas_cumprod, sqrt_one_minus_alphas_cumprod, t, noise=None):
-    """Forward diffusion process: q(x_t | x_0)."""
-    if noise is None:
-        noise = torch.randn_like(x_start)
-    sqrt_alphas_cumprod_t = extract(sqrt_alphas_cumprod, t, x_start.shape)
-    sqrt_one_minus_alphas_cumprod_t = extract(sqrt_one_minus_alphas_cumprod, t, x_start.shape)
-    return sqrt_alphas_cumprod_t * x_start + sqrt_one_minus_alphas_cumprod_t * noise, noise
-
-
-# --- Sampling Functions (DDPM Ancestral Sampler) ---
-@torch.no_grad()
-def p_sample_cfg(
-    model, betas, sqrt_one_minus_alphas_cumprod, sqrt_recip_alphas, posterior_variance,
-    z, t, t_index_sampler, conditional_class_labels, cfg_scale, null_class_token_id
-):
-    """Single step of the reverse diffusion process with CFG."""
-    # Enable CFG in model
-    using_cfg = cfg_scale >= 1.0
-    y = conditional_class_labels
-    if using_cfg:
-        z_final = torch.cat([z, z], 0)
-        n = conditional_class_labels.shape[0]
-        y_null = torch.tensor([null_class_token_id] * n, device=conditional_class_labels.device)
-        y = torch.cat([y, y_null], 0)
-    else:
-        z_final = z
-    t = t.expand(z_final.shape[0])
-    noise_pred = model(z_final, t, y)
-
-    # Perform CFG
-    if using_cfg:
-        pred_noise_cond, pred_noise_uncond = noise_pred.chunk(2, dim=0)
-        noise_pred = pred_noise_uncond + cfg_scale * (pred_noise_cond - pred_noise_uncond)
-
-    # DDPM sampling step
-    t_for_steps = t[..., :(len(z_final) // 2)] if using_cfg else t
-    betas_t = extract(betas, t_for_steps, z.shape)
-    sqrt_one_minus_alphas_cumprod_t = extract(sqrt_one_minus_alphas_cumprod, t_for_steps, z.shape)
-    sqrt_recip_alphas_t = extract(sqrt_recip_alphas, t_for_steps, z.shape)
-    model_mean = sqrt_recip_alphas_t * (z - betas_t * noise_pred / sqrt_one_minus_alphas_cumprod_t)
-
-    if t_index_sampler == 0:
-        return model_mean
-    else:
-        posterior_variance_t = extract(posterior_variance, t_for_steps, z.shape)
-        noise_z = torch.randn_like(z)
-        return model_mean + torch.sqrt(posterior_variance_t) * noise_z
-
+# --- Sampling function (Euler) ---
 @torch.no_grad()
 def sample_conditional_cfg(
-    model, betas, sqrt_one_minus_alphas_cumprod, sqrt_recip_alphas, posterior_variance, target_classes_list, cfg_scale=5.0, num_samples_per_cls=1, null_token_id=NUM_CLASSES
+    model, target_classes_list, ode_steps, cfg_scale=5.0, num_samples_per_cls=1, null_token_id=NUM_CLASSES
 ):
     """Generate images for specified target classes using CFG."""
     model.eval()
     num_target_cls = len(target_classes_list)
     total_images_to_sample = num_samples_per_cls * num_target_cls
+
+    # Initial state
     z = torch.randn((total_images_to_sample, IMG_CHANNELS, IMG_SIZE, IMG_SIZE), device=DEVICE)
 
     # Prepare conditional labels
@@ -108,12 +65,32 @@ def sample_conditional_cfg(
     for c_idx in target_classes_list:
         sample_cls_labels_list.extend([c_idx] * num_samples_per_cls)
     conditional_labels = torch.tensor(sample_cls_labels_list, device=DEVICE).long()
+
+    # CFG stuff
+    using_cfg = cfg_scale >= 1.0
+    y = conditional_labels
+    if using_cfg:
+        n = conditional_labels.shape[0]
+        y_null = torch.tensor([null_token_id] * n, device=conditional_labels.device)
+        y = torch.cat([y, y_null], 0)
+
+    # ODE derivative term
+    bsz = z.shape[0]
+    dt = 1.0 / ode_steps
+    dt = torch.tensor([dt] * bsz).to(z.device).view([bsz, *([1] * len(z.shape[1:]))])
     
-    for i in reversed(range(0, NUM_TIMESTEPS)):
-        t_for_sampling = torch.tensor([i], device=DEVICE, dtype=torch.long)
-        z = p_sample_cfg(
-            model, betas, sqrt_one_minus_alphas_cumprod, sqrt_recip_alphas, posterior_variance, z, t_for_sampling, i, conditional_labels, cfg_scale, null_token_id
-        )
+    # Flow-sampling
+    for i in range(ode_steps, 0, -1):
+        z_final = torch.cat([z, z], 0) if using_cfg else z
+        t = i / ode_steps
+        t = torch.tensor([t] * z_final.shape[0]).to(z_final.device, dtype=z_final.dtype)
+        predicted_velocity = model(z_final, t, y)
+        if using_cfg:
+            pred_cond, pred_uncond = predicted_velocity.chunk(2, dim=0)
+            predicted_velocity = pred_uncond + cfg_scale * (pred_cond - pred_uncond)
+        # Euler step
+        z = (z - dt * predicted_velocity).to(z.dtype)
+    
     images = (z + 1) / 2.0  # De-normalize from [-1, 1] to [0, 1]
     images = torch.clamp(images, 0.0, 1.0)
 
@@ -121,22 +98,8 @@ def sample_conditional_cfg(
     return images, conditional_labels
 
 def train():
-    # --- Diffusion Schedule (Linear) ---
-    # Define all the co-efficients.
-    beta_start = 0.0001
-    beta_end = 0.02
-    betas = torch.linspace(beta_start, beta_end, NUM_TIMESTEPS, device=DEVICE)
-
-    alphas = 1.0 - betas
-    alphas_cumprod = torch.cumprod(alphas, dim=0)
-    alphas_cumprod_prev = torch.nn.functional.pad(alphas_cumprod[:-1], (1, 0), value=1.0)
-    sqrt_recip_alphas = torch.sqrt(1.0 / alphas)
-    sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod)
-    sqrt_one_minus_alphas_cumprod = torch.sqrt(1.0 - alphas_cumprod)
-    posterior_variance = betas * (1.0 - alphas_cumprod_prev) / (1.0 - alphas_cumprod)
-
     # --- Model Instantiation ---
-    model = NanoDiT(  # Pass your DiT args here
+    model = NanoDiT(
         input_size=IMG_SIZE,
         patch_size=PATCH_SIZE,
         in_channels=IMG_CHANNELS,
@@ -144,6 +107,7 @@ def train():
         depth=MODEL_DEPTH,
         num_heads=MODEL_HEADS,
         num_classes=NUM_CLASSES,
+        timestep_freq_scale=1000,
     ).to(DEVICE)
     if COMPILE:
         print("`torch.compile()` enabled.")
@@ -152,9 +116,9 @@ def train():
     # --- Optimizer and loss  ---
     optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE)
     scaler = torch.GradScaler() if AMP_DTYPE is not None else None
-    criterion = nn.MSELoss()  # Loss is typically MSE between predicted noise and actual noise
+    criterion = nn.MSELoss()
     amp_context = (
-        torch.autocast(device_type=torch.device(DEVICE).type, dtype=torch.bfloat16) 
+        torch.autocast(device_type=torch.device(DEVICE).type, dtype=AMP_DTYPE) 
         if AMP_DTYPE is not None
         else nullcontext()
     )
@@ -162,15 +126,17 @@ def train():
         print(f"Using automatic mixed-precision in {AMP_DTYPE} (change if needed).")
 
     # --- Dataset and DataLoader  ---
-    trfs_cifar = transforms.Compose(
+    ds_trfs = transforms.Compose(
         [
+            transforms.Resize(IMG_SIZE, interpolation=transforms.InterpolationMode.BILINEAR),
+            transforms.CenterCrop(IMG_SIZE),
             transforms.ToTensor(),
             transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),  # Normalize to [-1, 1]
         ]
     )
-
-    # Download and load the CIFAR-10 training dataset
-    train_dataset = torchvision.datasets.CIFAR10(train=True, root=DATA_DIR, download=True, transform=trfs_cifar)
+    train_dataset = torchvision.datasets.ImageFolder(DATA_DIR, transform=ds_trfs)
+    train_classes = list(set(train_dataset.class_to_idx.values()))
+    assert NUM_CLASSES == len(train_classes)
     train_dataloader = DataLoader(
         train_dataset,
         batch_size=BATCH_SIZE,
@@ -193,17 +159,15 @@ def train():
             real_images = real_images.to(DEVICE, non_blocking=True)  # Shape: (B, C, H, W)
             class_ids = class_ids.to(DEVICE, non_blocking=True)  # Shape: (B,)
 
-            # 1. Sample timesteps
-            t_timesteps = torch.randint(0, NUM_TIMESTEPS, (real_images.shape[0],), device=DEVICE).long()
-            # 2. Noise images according to t (forward process q(x_t | x_0))
-            xt_noisy_images, added_noise_epsilon = q_sample(
-                real_images, sqrt_alphas_cumprod,sqrt_one_minus_alphas_cumprod, t=t_timesteps
-            )
+            # 1. Interpolate between clean data and noise
+            zt, z1, t = flow_lerp(real_images)
+            # 2. Target velocity: u_t = x1 - x0
+            target_velocity_field = z1 - real_images
             with amp_context:
-                # 3. Predict noise using the model
-                pred_noise = model(xt_noisy_images, t_timesteps, class_ids)
+                # 3. Predict velocity using the model
+                predicted_velocity = model(zt, t, class_ids)
                 # 4. Calculate loss
-                loss = criterion(pred_noise, added_noise_epsilon)
+                loss = criterion(target_velocity_field, predicted_velocity)
             # 5. Backpropagate and update weights
             if scaler is not None:
                 scaler.scale(loss).backward()
@@ -221,8 +185,8 @@ def train():
             print(f"\nSampling images at epoch {epoch + 1}...")
             classes_to_sample_list = list(range(min(NUM_CLASSES, 5)))
             generated_sample_images, _ = sample_conditional_cfg(
-                model, betas, sqrt_one_minus_alphas_cumprod, sqrt_recip_alphas, posterior_variance,
-                classes_to_sample_list, cfg_scale=CFG_SCALE, num_samples_per_cls=NUM_SAMPLES_PER_CLASS
+                model, classes_to_sample_list, ode_steps=NUM_ODE_STEPS,
+                cfg_scale=CFG_SCALE, num_samples_per_cls=NUM_SAMPLES_PER_CLASS
             )
             # Save as a grid
             if generated_sample_images.nelement() > 0:  # Check if any images were generated
