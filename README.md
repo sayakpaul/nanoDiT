@@ -50,7 +50,8 @@ If you're running training on MPS, please change the `DEVICE` accordingly. The i
 The repo aims at bringing the essential components while striving to be minimal and reasonable:
 
 * Pixel-space instead of latent-space because VAE is a separate magic which was purposefully discarded from this repo.
-* DiT as the base architecture as this is the core behind modern models like Flux.
+* DiT as the base architecture, as this is the core behind modern models like Flux.
 * Class-conditional to show how to embed conditions other than just timesteps.
 * Rectified flows for a simpler alternative to DDPM-style diffusion training.
-* You can fiddle around with the model and the training setup in your local laptop.
+* You can fiddle around with the model and the training setup on your local laptop.
+* Implements classifier-free guidance for training and inference, as it's a common practice.
