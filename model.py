@@ -13,7 +13,7 @@ import math
 import torch.nn.functional as F
 
 
-def modulate(x, shift, scale):
+def modulate(x, shift, scale): #shift and scale sound like mean and variance, the idea being 1+scale is because you'd scale by saying 1+0.2
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
 
 
@@ -41,7 +41,7 @@ class PatchEmbed(nn.Module):
 
     def forward(self, x: torch.Tensor):
         x = self.proj(x)
-        x = x.flatten(2).transpose(1, 2)  # NCHW -> NLC
+        x = x.flatten(2).transpose(1, 2)  # NCHW -> NLC, fun to know that flatten takes in an argument, this is used to indicate from which index to flatten
         return x
 
 

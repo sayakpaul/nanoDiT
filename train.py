@@ -12,14 +12,14 @@ import torchvision
 from contextlib import nullcontext
 
 # --- Hyperparameters ---
-NUM_CLASSES = 75  
-IMG_SIZE = 64
+NUM_CLASSES = 152  
+IMG_SIZE = 256
 IMG_CHANNELS = 3 
 # DiT specific parameters
-LATENT_DIM = 768
-PATCH_SIZE = 2
-MODEL_DEPTH = 12
-MODEL_HEADS = 12
+LATENT_DIM = 128
+# PATCH_SIZE = 2
+MODEL_DEPTH = 24
+MODEL_HEADS = 8
 # Diffusion process parameters
 NUM_ODE_STEPS = 150
 # Training parameters
@@ -31,11 +31,11 @@ COMPILE = True
 AMP_DTYPE = torch.bfloat16 # automatic mixed-precision unless you wanna touch grass
 # Sampling parameters
 SAMPLE_INTERVAL = 10  # Sample every N epochs
-NUM_SAMPLES_PER_CLASS = 4  # Number of images to sample per class during evaluation
+NUM_SAMPLES_PER_CLASS = 1 # Number of images to sample per class during evaluation
 CFG_SCALE = 5.0
 # Others
 CHECKPOINT_SAVE_INTERVAL = 25
-DATA_DIR = "butterflies" # Directory where the dataset is stored.
+DATA_DIR = "/home/chiragjishu/chirag/DiT/nanoDiT/dataset/pokemon_jpg/pokemon_jpg//" # Directory where the dataset is stored.
 
 # --- Helper functions for flow-matching math ---
 def flow_lerp(x):
